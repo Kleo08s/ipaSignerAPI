@@ -361,6 +361,22 @@ const globalLimiter =
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
+const WELCOME_MESSAGE = `Hey! Welcome to the ipaSignerAPI made by Kleo08s!
+Sadly there isn't a web interface, so you'll need to interact with the API directly using fancy code...
+
+* Project / Documentation:
+https://github.com/Kleo08s/ipaSignerAPI
+
+* Discord Server:
+https://kleo08s.lol/discord
+
+Have fun! :)
+`;
+
+app.get('/', (_req, res) => {
+  res.type('text/plain; charset=utf-8').send(WELCOME_MESSAGE);
+});
+
 async function prepareJob(req, _res, next) {
   try {
     req.jobId = randomUUID();
