@@ -1,16 +1,25 @@
 services:
   ipa-signer:
     image: ghcr.io/kleo08s/ipasignerapi:latest
-    build: .
     container_name: ipasignerapi
     restart: unless-stopped
-    env_file: .env
     environment:
       DATA_DIR: /data
+      PORT: ${PORT:-3000}
+      DOMAIN: ${DOMAIN:?Set DOMAIN (e.g. sign.example.com)}
+      MAX_IPA_MB: ${MAX_IPA_MB:-500}
+      MAX_MOBILEPROVISION_MB: ${MAX_MOBILEPROVISION_MB:-1}
+      MAX_P12_MB: ${MAX_P12_MB:-1}
+      CLEANUP_MINUTES: ${CLEANUP_MINUTES:-60}
+      RATE_LIMIT_IP_MAX: ${RATE_LIMIT_IP_MAX:-10}
+      RATE_LIMIT_IP_WINDOW_MINUTES: ${RATE_LIMIT_IP_WINDOW_MINUTES:-60}
+      RATE_LIMIT_GLOBAL_MAX: ${RATE_LIMIT_GLOBAL_MAX:-100}
+      RATE_LIMIT_GLOBAL_WINDOW_MINUTES: ${RATE_LIMIT_GLOBAL_WINDOW_MINUTES:-60}
+      TRUST_PROXY: ${TRUST_PROXY:-1}
     ports:
       - "${PORT:-3000}:${PORT:-3000}"
     volumes:
-      - ipa-data:/data
+      - ipasignerapi-data:/data
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:' + (process.env.PORT || 3000) + '/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
       interval: 30s
@@ -19,4 +28,4 @@ services:
       start_period: 10s
 
 volumes:
-  ipa-data:
+  ipasignerapi-data:
