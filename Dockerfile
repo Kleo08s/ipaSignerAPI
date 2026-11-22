@@ -11,7 +11,7 @@ RUN git clone --depth 1 https://github.com/zhlynn/zsign.git /zsign \
 # --- App --------------------------------------------------------------------
 FROM node:20-bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      libssl3 zlib1g \
+      libssl3 zlib1g openssl \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=zsign-build /usr/local/bin/zsign /usr/local/bin/zsign
 

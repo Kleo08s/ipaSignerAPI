@@ -2,6 +2,7 @@ require('dotenv').config();
 
 const express = require('express');
 const multer = require('multer');
+const { rateLimit } = require('express-rate-limit');
 const yauzl = require('yauzl');
 const plist = require('plist');
 const bplist = require('bplist-parser');
@@ -17,9 +18,11 @@ const path = require('node:path');
 // ---------------------------------------------------------------------------
 const MB = 1024 * 1024;
 
-function envNumber(name, def) {
+function envNumber(name, def, allowZero = false) {
   const v = Number(process.env[name] ?? def);
-  if (!Number.isFinite(v) || v <= 0) throw new Error(`Variabile ${name} non valida`);
+  if (!Number.isFinite(v) || v < 0 || (v === 0 && !allowZero)) {
+    throw new Error(`Variabile ${name} non valida`);
+  }
   return v;
 }
 
@@ -30,6 +33,17 @@ const BASE_URL = (/^https?:\/\//i.test(process.env.DOMAIN) ? process.env.DOMAIN 
 const DATA_DIR = path.resolve(process.env.DATA_DIR || './data');
 const ZSIGN_PATH = process.env.ZSIGN_PATH || 'zsign';
 const CLEANUP_MS = envNumber('CLEANUP_MINUTES', 60) * 60 * 1000;
+
+// Numero di proxy davanti all'app (serve per leggere l'IP reale del client). 0 = nessuno.
+const TRUST_PROXY = envNumber('TRUST_PROXY', 1, true);
+
+// Rate limiting su /sign. Un valore MAX uguale a 0 disattiva quel limite.
+const RATE = {
+  ipMax: envNumber('RATE_LIMIT_IP_MAX', 10, true),
+  ipWindowMs: envNumber('RATE_LIMIT_IP_WINDOW_MINUTES', 60) * 60 * 1000,
+  globalMax: envNumber('RATE_LIMIT_GLOBAL_MAX', 100, true),
+  globalWindowMs: envNumber('RATE_LIMIT_GLOBAL_WINDOW_MINUTES', 60) * 60 * 1000,
+};
 
 const LIMITS = {
   ipa: envNumber('MAX_IPA_MB', 500) * MB,
@@ -130,6 +144,61 @@ function runZsign({ input, p12, password, mobileprovision, output }) {
       resolve();
     });
   });
+}
+
+// ---------------------------------------------------------------------------
+// Verifica del p12 (password corretta, cifrari legacy) prima di firmare
+// ---------------------------------------------------------------------------
+// La password viene passata a openssl via variabile d'ambiente, non come argomento.
+function openssl(args, password) {
+  return new Promise((resolve) => {
+    execFile(
+      'openssl',
+      args,
+      { env: { ...process.env, P12_PASS: password }, timeout: 30 * 1000, maxBuffer: MB },
+      (err, _stdout, stderr) => resolve({ ok: !err, missing: err?.code === 'ENOENT', stderr: String(stderr || '') })
+    );
+  });
+}
+
+const WRONG_PASSWORD = 'Password del p12 errata (oppure file p12 corrotto)';
+const isMacFailure = (stderr) => /mac verify failure/i.test(stderr);
+
+// Ritorna il percorso del p12 da usare per la firma (originale o convertito in formato moderno).
+async function checkP12(p12Path, password, jobDir) {
+  const base = ['pkcs12', '-in', p12Path, '-nokeys', '-noout', '-passin', 'env:P12_PASS'];
+
+  let r = await openssl(base, password);
+  if (r.missing) return p12Path; // openssl non installato: lascio decidere a zsign
+  if (r.ok) return p12Path;
+  if (isMacFailure(r.stderr)) throw httpError(400, WRONG_PASSWORD);
+
+  // Probabile p12 con cifrari vecchi (RC2/3DES) non supportati da OpenSSL 3: riprovo in modalità legacy
+  r = await openssl([...base, '-legacy'], password);
+  if (!r.ok) {
+    if (isMacFailure(r.stderr)) throw httpError(400, WRONG_PASSWORD);
+    throw httpError(400, `File p12 non leggibile: ${r.stderr.trim().slice(-300)}`);
+  }
+
+  // Lo converto in un p12 moderno, che zsign riesce a leggere
+  const pem = path.join(jobDir, 'tmp.pem');
+  const modern = path.join(jobDir, 'cert-modern.p12');
+  try {
+    const a = await openssl(
+      ['pkcs12', '-in', p12Path, '-legacy', '-nodes', '-passin', 'env:P12_PASS', '-out', pem],
+      password
+    );
+    if (!a.ok) throw httpError(400, `Conversione del p12 fallita: ${a.stderr.trim().slice(-300)}`);
+
+    const b = await openssl(
+      ['pkcs12', '-export', '-in', pem, '-out', modern, '-passout', 'env:P12_PASS'],
+      password
+    );
+    if (!b.ok) throw httpError(400, `Conversione del p12 fallita: ${b.stderr.trim().slice(-300)}`);
+  } finally {
+    await fsp.rm(pem, { force: true }); // contiene la chiave privata in chiaro
+  }
+  return modern;
 }
 
 // ---------------------------------------------------------------------------
@@ -260,6 +329,35 @@ function scheduleCleanup(id) {
 // ---------------------------------------------------------------------------
 const app = express();
 app.disable('x-powered-by');
+app.set('trust proxy', TRUST_PROXY);
+
+const noLimit = (_req, _res, next) => next();
+const tooMany = (message) => (_req, res) => res.status(429).json({ error: message });
+
+// Limite per singolo IP
+const ipLimiter =
+  RATE.ipMax > 0
+    ? rateLimit({
+        windowMs: RATE.ipWindowMs,
+        limit: RATE.ipMax,
+        standardHeaders: 'draft-7',
+        legacyHeaders: false,
+        handler: tooMany('Troppe richieste da questo IP, riprova più tardi'),
+      })
+    : noLimit;
+
+// Limite globale (tutti gli utenti insieme)
+const globalLimiter =
+  RATE.globalMax > 0
+    ? rateLimit({
+        windowMs: RATE.globalWindowMs,
+        limit: RATE.globalMax,
+        standardHeaders: 'draft-7',
+        legacyHeaders: false,
+        keyGenerator: () => 'global',
+        handler: tooMany('Servizio al momento troppo carico, riprova più tardi'),
+      })
+    : noLimit;
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
@@ -274,7 +372,7 @@ async function prepareJob(req, _res, next) {
   }
 }
 
-app.post('/sign', prepareJob, upload, async (req, res, next) => {
+app.post('/sign', ipLimiter, globalLimiter, prepareJob, upload, async (req, res, next) => {
   const { jobId, jobDir } = req;
   try {
     const files = req.files || {};
@@ -286,12 +384,15 @@ app.post('/sign', prepareJob, upload, async (req, res, next) => {
       }
     }
 
+    const password = req.body?.password ?? '';
+    const p12Path = await checkP12(path.join(jobDir, FILENAMES.p12), password, jobDir);
+
     const signedPath = path.join(jobDir, 'signed.ipa');
     await runZsign({
       input: path.join(jobDir, FILENAMES.ipa),
-      p12: path.join(jobDir, FILENAMES.p12),
+      p12: p12Path,
       mobileprovision: path.join(jobDir, FILENAMES.mobileprovision),
-      password: req.body?.password ?? '',
+      password,
       output: signedPath,
     });
 
