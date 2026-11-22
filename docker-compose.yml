@@ -1,6 +1,6 @@
 services:
   ipa-signer:
-    image: ghcr.io/Kleo08s/ipasignerapi:latest
+    image: ghcr.io/Kleo08s/ipaSignerAPI:latest
     build: .
     container_name: ipasignerapi
     restart: unless-stopped
