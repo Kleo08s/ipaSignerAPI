@@ -73,7 +73,7 @@ function httpError(status, message) {
 }
 
 const jobDirOf = (id) => path.join(DATA_DIR, id);
-const removeJob = (id) => fsp.rm(jobDirOf(id), { recursive: true, force: true }).catch(() => {});
+const removeJob = (id) => fsp.rm(jobDirOf(id), { recursive: true, force: true }).catch(() => { });
 
 function xmlEscape(s) {
   return String(s)
@@ -100,7 +100,7 @@ class LimitedDiskStorage {
         size += chunk.length;
         if (size > limit) {
           return done(
-            httpError(413, `Il file "${file.fieldname}" supera il limite di ${Math.round(limit / MB)} MB`)
+            httpError(413, `The file "${file.fieldname}" exceeds the limit of ${Math.round(limit / MB)} MB`)
           );
         }
         done(null, chunk);
@@ -139,7 +139,7 @@ function runZsign({ input, p12, password, mobileprovision, output }) {
     execFile(ZSIGN_PATH, args, { timeout: 5 * 60 * 1000, maxBuffer: 10 * MB }, (err, stdout, stderr) => {
       if (err) {
         const details = `${stdout || ''}\n${stderr || ''}`.trim().slice(-1000);
-        return reject(httpError(422, `Firma fallita${details ? `: ${details}` : ''}`));
+        return reject(httpError(422, `Sign failed${details ? `: ${details}` : ''}`));
       }
       resolve();
     });
@@ -161,7 +161,7 @@ function openssl(args, password) {
   });
 }
 
-const WRONG_PASSWORD = 'Password del p12 errata (oppure file p12 corrotto)';
+const WRONG_PASSWORD = 'P12 password wrong (or the file is corrupted)';
 const isMacFailure = (stderr) => /mac verify failure/i.test(stderr);
 
 // Ritorna il percorso del p12 da usare per la firma (originale o convertito in formato moderno).
@@ -177,7 +177,7 @@ async function checkP12(p12Path, password, jobDir) {
   r = await openssl([...base, '-legacy'], password);
   if (!r.ok) {
     if (isMacFailure(r.stderr)) throw httpError(400, WRONG_PASSWORD);
-    throw httpError(400, `File p12 non leggibile: ${r.stderr.trim().slice(-300)}`);
+    throw httpError(400, `p12 file unreadable: ${r.stderr.trim().slice(-300)}`);
   }
 
   // Lo converto in un p12 moderno, che zsign riesce a leggere
@@ -188,13 +188,13 @@ async function checkP12(p12Path, password, jobDir) {
       ['pkcs12', '-in', p12Path, '-legacy', '-nodes', '-passin', 'env:P12_PASS', '-out', pem],
       password
     );
-    if (!a.ok) throw httpError(400, `Conversione del p12 fallita: ${a.stderr.trim().slice(-300)}`);
+    if (!a.ok) throw httpError(400, `p12 conversion failed: ${a.stderr.trim().slice(-300)}`);
 
     const b = await openssl(
       ['pkcs12', '-export', '-in', pem, '-out', modern, '-passout', 'env:P12_PASS'],
       password
     );
-    if (!b.ok) throw httpError(400, `Conversione del p12 fallita: ${b.stderr.trim().slice(-300)}`);
+    if (!b.ok) throw httpError(400, `p12 conversion failed: ${b.stderr.trim().slice(-300)}`);
   } finally {
     await fsp.rm(pem, { force: true }); // contiene la chiave privata in chiaro
   }
@@ -214,7 +214,7 @@ function parsePlist(buf) {
 function readInfoPlist(ipaPath) {
   return new Promise((resolve, reject) => {
     yauzl.open(ipaPath, { lazyEntries: true }, (err, zip) => {
-      if (err) return reject(httpError(400, 'IPA non valido (non è un archivio zip)'));
+      if (err) return reject(httpError(400, 'IPA not valid (it\'s not a zip archive)'));
 
       const re = /^Payload\/[^/]+\.app\/Info\.plist$/;
       let found = false;
@@ -244,7 +244,7 @@ function readInfoPlist(ipaPath) {
         });
       });
       zip.on('end', () => {
-        if (!found) reject(httpError(400, 'Info.plist non trovato nell\'IPA'));
+        if (!found) reject(httpError(400, 'Info.plist not found on the IPA.'));
       });
       zip.on('error', reject);
       zip.readEntry();
@@ -310,7 +310,7 @@ async function sweep() {
       }
       if (now - createdAt >= CLEANUP_MS) {
         await removeJob(id);
-        console.log(`[cleanup] rimosso ${id}`);
+        console.log(`[cleanup] removed ${id}`);
       }
     } catch {
       /* ignora */
@@ -320,7 +320,7 @@ async function sweep() {
 
 function scheduleCleanup(id) {
   setTimeout(() => {
-    removeJob(id).then(() => console.log(`[cleanup] rimosso ${id}`));
+    removeJob(id).then(() => console.log(`[cleanup] removed ${id}`));
   }, CLEANUP_MS).unref();
 }
 
@@ -338,25 +338,25 @@ const tooMany = (message) => (_req, res) => res.status(429).json({ error: messag
 const ipLimiter =
   RATE.ipMax > 0
     ? rateLimit({
-        windowMs: RATE.ipWindowMs,
-        limit: RATE.ipMax,
-        standardHeaders: 'draft-7',
-        legacyHeaders: false,
-        handler: tooMany('Troppe richieste da questo IP, riprova più tardi'),
-      })
+      windowMs: RATE.ipWindowMs,
+      limit: RATE.ipMax,
+      standardHeaders: 'draft-7',
+      legacyHeaders: false,
+      handler: tooMany('Too much requests from this IP, please try again later.'),
+    })
     : noLimit;
 
 // Limite globale (tutti gli utenti insieme)
 const globalLimiter =
   RATE.globalMax > 0
     ? rateLimit({
-        windowMs: RATE.globalWindowMs,
-        limit: RATE.globalMax,
-        standardHeaders: 'draft-7',
-        legacyHeaders: false,
-        keyGenerator: () => 'global',
-        handler: tooMany('Servizio al momento troppo carico, riprova più tardi'),
-      })
+      windowMs: RATE.globalWindowMs,
+      limit: RATE.globalMax,
+      standardHeaders: 'draft-7',
+      legacyHeaders: false,
+      keyGenerator: () => 'global',
+      handler: tooMany('Service too overloaded at the moment, please try again later.'),
+    })
     : noLimit;
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
@@ -394,9 +394,9 @@ app.post('/sign', ipLimiter, globalLimiter, prepareJob, upload, async (req, res,
     const files = req.files || {};
     for (const field of Object.keys(EXTENSIONS)) {
       const f = files[field]?.[0];
-      if (!f) throw httpError(400, `Campo mancante: ${field}`);
+      if (!f) throw httpError(400, `Missing field: ${field}`);
       if (!f.originalname.toLowerCase().endsWith(EXTENSIONS[field])) {
-        throw httpError(400, `Il file "${field}" deve avere estensione ${EXTENSIONS[field]}`);
+        throw httpError(400, `The file "${field}" needs to have the extension ${EXTENSIONS[field]}`);
       }
     }
 
@@ -414,7 +414,7 @@ app.post('/sign', ipLimiter, globalLimiter, prepareJob, upload, async (req, res,
 
     const info = await readInfoPlist(signedPath);
     const bundleId = info.CFBundleIdentifier;
-    if (!bundleId) throw httpError(422, 'CFBundleIdentifier mancante nell\'IPA firmato');
+    if (!bundleId) throw httpError(422, 'CFBundleIdentifier missing on the signed IPA');
 
     const ipaUrl = `${BASE_URL}/files/${jobId}/signed.ipa`;
     const manifestUrl = `${BASE_URL}/manifest/${jobId}.plist`;
@@ -455,7 +455,7 @@ async function requireJob(req, res, next) {
     const meta = JSON.parse(await fsp.readFile(path.join(jobDirOf(id), 'meta.json'), 'utf8'));
     if (Date.now() - meta.createdAt >= CLEANUP_MS) {
       removeJob(id);
-      return res.status(404).send('Link scaduto');
+      return res.status(404).send('Link expired');
     }
     req.jobId = id;
     next();
@@ -481,12 +481,12 @@ app.get('/install/:id', requireJob, (req, res) => {
   res.type('html').send(`<!doctype html>
 <html lang="it"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Installa app</title>
+<title>Install app</title>
 <style>
   body{font-family:system-ui,sans-serif;display:grid;place-items:center;min-height:100vh;margin:0;background:#f5f5f7}
   a{background:#0071e3;color:#fff;padding:16px 32px;border-radius:14px;text-decoration:none;font-size:18px}
 </style></head>
-<body><a href="${xmlEscape(link)}">Installa</a></body></html>`);
+<body><a href="${xmlEscape(link)}">Install</a></body></html>`);
 });
 
 // Gestione errori
@@ -495,13 +495,13 @@ app.use(async (err, req, res, _next) => {
   if (req.jobId && !req.jobDone) await removeJob(req.jobId);
 
   let status = err.status || 500;
-  let message = err.message || 'Errore interno';
+  let message = err.message || 'Internal error';
   if (err instanceof multer.MulterError) {
     status = 400;
-    message = `Errore upload: ${err.message}`;
+    message = `Upload error: ${err.message}`;
   }
   if (status === 500) console.error(err);
-  res.status(status).json({ error: status === 500 ? 'Errore interno' : message });
+  res.status(status).json({ error: status === 500 ? 'Internal error' : message });
 });
 
 (async () => {
@@ -509,6 +509,6 @@ app.use(async (err, req, res, _next) => {
   await sweep();
   setInterval(sweep, 5 * 60 * 1000).unref();
   app.listen(PORT, () => {
-    console.log(`IPA signer in ascolto su :${PORT} - dominio: ${BASE_URL}`);
+    console.log(`ipaSignerAPI listening on :${PORT} - domain: ${BASE_URL}`);
   });
 })();
